@@ -8,6 +8,7 @@ pub mod test;
 use futures::Future;
 use rand::{seq::SliceRandom, Rng};
 use regex::Regex;
+use std::ffi::OsString;
 use std::sync::OnceLock;
 use std::{
     borrow::Cow,
@@ -271,19 +272,20 @@ pub fn parse_env_output(env: &str, mut f: impl FnMut(String, String)) {
     }
 }
 
+/// Environment variables, for serialization/deserialization.
+pub type EnvVars = Vec<(OsString, OsString)>;
+
 /// Parse the result of calling `cli --internal-dump-env` (where `cli`
 /// corresponds to the binary produced by the `cli` package in this workspace)
+///
+/// The format is expected to be understood by [`bincode`]. An error is logged
+/// when the serialized form cannot be understood.
 pub fn parse_dump_env_output(env: &[u8], mut f: impl FnMut(&OsStr, &OsStr)) {
-    let mut parts = env.split(|b| *b == 0u8);
-    while let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-        // Safe because we've (presumably, <hint>) obtained this from running
-        // `/path/to/cli --internal-dump-env`, where the `cli` binary was built
-        // with the same Rust version and for the same target platform as the
-        // current executable; see [`OsStr::from_encoded_bytes_unchecked`] for
-        // the safety constraints.
-        let key = unsafe { OsStr::from_encoded_bytes_unchecked(key) };
-        let value = unsafe { OsStr::from_encoded_bytes_unchecked(value) };
-        f(key, value);
+    let vars = bincode::deserialize::<EnvVars>(env).log_err();
+    if let Some(vars) = vars {
+        for (key, value) in vars {
+            f(&key, &value);
+        }
     }
 }
 

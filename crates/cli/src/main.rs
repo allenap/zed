@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
     thread::{self, JoinHandle},
 };
-use util::paths::PathLikeWithPosition;
+use util::{paths::PathLikeWithPosition, EnvVars};
 
 struct Detect;
 
@@ -55,9 +55,8 @@ struct Args {
 
     /// [INTERNAL] Dump environment to stdout
     ///
-    /// The output is platform-specific and should only be consumed by another
-    /// Zed process running on the same platform, built with the same toolchain,
-    /// Rust version, and so on.
+    /// The output is binary, platform-specific, and should only be consumed by
+    /// another Zed process running on the same platform.
     #[arg(long, exclusive = true, hide = true)]
     internal_dump_env: bool,
 }
@@ -93,20 +92,11 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     let args = flatpak::set_bin_if_no_escape(args);
 
-    // [INTERNAL] Write environment variables to stdout. Keys and values are
-    // written alternately, each terminated by a `NUL` byte. Keys and values are
-    // encoded by [`OsStr::as_encoded_bytes`]. To satisfy the safety constraints
-    // of [`OsString::from_encoded_bytes_unchecked`], the executable on the
-    // receiving end should have been built with the same version of Rust and
-    // for the same target platform as this executable.
+    // [INTERNAL] Write environment variables to stdout.
     if args.internal_dump_env {
-        let mut stdout = std::io::stdout().lock();
-        for (key, value) in std::env::vars_os() {
-            stdout.write_all(key.as_encoded_bytes())?;
-            stdout.write_all(b"\0")?;
-            stdout.write_all(value.as_encoded_bytes())?;
-            stdout.write_all(b"\0")?;
-        }
+        let vars: EnvVars = std::env::vars_os().collect::<Vec<_>>();
+        let dump = bincode::serialize(&vars).context("could not serialize environment")?;
+        io::stdout().write_all(&dump)?;
         return Ok(());
     }
 

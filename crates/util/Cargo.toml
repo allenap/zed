@@ -17,6 +17,7 @@ test-support = ["tempfile", "git2"]
 
 [dependencies]
 anyhow.workspace = true
+bincode.workspace = true
 collections.workspace = true
 dirs.workspace = true
 futures.workspace = true
