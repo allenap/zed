@@ -85,6 +85,7 @@ search.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+shell-quote.workspace = true
 simplelog = "0.9"
 smol.workspace = true
 tab_switcher.workspace = true

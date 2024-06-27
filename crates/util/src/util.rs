@@ -13,6 +13,7 @@ use std::{
     borrow::Cow,
     cmp::{self, Ordering},
     env,
+    ffi::OsStr,
     ops::{AddAssign, Range, RangeInclusive},
     panic::Location,
     pin::Pin,
@@ -267,6 +268,22 @@ pub fn parse_env_output(env: &str, mut f: impl FnMut(String, String)) {
     }
     if let Some((key, value)) = Option::zip(current_key.take(), current_value.take()) {
         f(key, value)
+    }
+}
+
+/// Parse the result of calling `cli --internal-dump-env` (where `cli`
+/// corresponds to the binary produced by the `cli` package in this workspace)
+pub fn parse_dump_env_output(env: &[u8], mut f: impl FnMut(&OsStr, &OsStr)) {
+    let mut parts = env.split(|b| *b == 0u8);
+    while let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+        // Safe because we've (presumably, <hint>) obtained this from running
+        // `/path/to/cli --internal-dump-env`, where the `cli` binary was built
+        // with the same Rust version and for the same target platform as the
+        // current executable; see [`OsStr::from_encoded_bytes_unchecked`] for
+        // the safety constraints.
+        let key = unsafe { OsStr::from_encoded_bytes_unchecked(key) };
+        let value = unsafe { OsStr::from_encoded_bytes_unchecked(value) };
+        f(key, value);
     }
 }
 

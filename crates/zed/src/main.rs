@@ -32,7 +32,7 @@ use settings::{handle_settings_file_changes, watch_config_file, Settings, Settin
 use simplelog::ConfigBuilder;
 use smol::process::Command;
 use std::{
-    env,
+    env, ffi,
     fs::OpenOptions,
     io::{IsTerminal, Write},
     path::Path,
@@ -40,7 +40,7 @@ use std::{
     sync::Arc,
 };
 use theme::{ActiveTheme, SystemAppearance, ThemeRegistry, ThemeSettings};
-use util::{maybe, parse_env_output, with_clone, ResultExt, TryFutureExt};
+use util::{maybe, parse_dump_env_output, with_clone, ResultExt, TryFutureExt};
 use uuid::Uuid;
 use welcome::{show_welcome_view, BaseKeymap, FIRST_OPEN};
 use workspace::{AppState, WorkspaceSettings, WorkspaceStore};
@@ -354,12 +354,15 @@ fn main() {
     let login_shell_env_loaded = if stdout_is_a_pty() {
         Task::ready(())
     } else {
-        app.background_executor().spawn(async {
+        let cli = app
+            .path_for_auxiliary_executable("cli")
+            .expect("could not find cli binary path");
+        app.background_executor().spawn(async move {
             #[cfg(unix)]
             {
                 load_shell_from_passwd().await.log_err();
             }
-            load_login_shell_environment().await.log_err();
+            load_login_shell_environment(&cli).await.log_err();
         })
     };
 
@@ -808,20 +811,28 @@ async fn load_shell_from_passwd() -> Result<()> {
     Ok(())
 }
 
-async fn load_login_shell_environment() -> Result<()> {
+async fn load_login_shell_environment(cli: &Path) -> Result<()> {
     let marker = "ZED_LOGIN_SHELL_START";
-    let shell = env::var("SHELL").context(
+    let shell = env::var_os("SHELL").context(
         "SHELL environment variable is not assigned so we can't source login environment variables",
     )?;
+
+    // Use quoting for Bourne Shell on the basis that it's probably understood
+    // by most shells... though we may want to check that.
+    use shell_quote::{QuoteExt, Sh};
 
     // If possible, we want to `cd` in the user's `$HOME` to trigger programs
     // such as direnv, asdf, mise, ... to adjust the PATH. These tools often hook
     // into shell's `cd` command (and hooks) to manipulate env.
     // We do this so that we get the env a user would have when spawning a shell
     // in home directory.
-    let shell_cmd_prefix = std::env::var_os("HOME")
-        .and_then(|home| home.into_string().ok())
-        .map(|home| format!("cd '{home}';"));
+    let shell_cmd_prefix = env::var_os("HOME").map(|home| {
+        let mut cmd_prefix = ffi::OsString::new();
+        cmd_prefix.push("cd ");
+        cmd_prefix.push_quoted(Sh, &home);
+        cmd_prefix.push("; ");
+        cmd_prefix
+    });
 
     // The `exit 0` is the result of hours of debugging, trying to find out
     // why running this command here, without `exit 0`, would mess
@@ -829,13 +840,17 @@ async fn load_login_shell_environment() -> Result<()> {
     // anymore.
     // We still don't know why `$SHELL -l -i -c '/usr/bin/env -0'`  would
     // do that, but it does, and `exit 0` helps.
-    let shell_cmd = format!(
-        "{}printf '%s' {marker}; /usr/bin/env; exit 0;",
-        shell_cmd_prefix.as_deref().unwrap_or("")
-    );
+    let shell_cmd = {
+        let mut cmd = shell_cmd_prefix.unwrap_or_default();
+        cmd.push(format!("printf '%s' {marker}; "));
+        cmd.push_quoted(Sh, cli);
+        cmd.push(" --internal-dump-env; exit 0;");
+        cmd
+    };
 
     let output = Command::new(&shell)
-        .args(["-l", "-i", "-c", &shell_cmd])
+        .args(["-l", "-i", "-c"])
+        .arg(&shell_cmd)
         .output()
         .await
         .context("failed to spawn login shell to source login environment variables")?;
@@ -843,15 +858,33 @@ async fn load_login_shell_environment() -> Result<()> {
         Err(anyhow!("login shell exited with error"))?;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let marker = marker.as_bytes();
+    let env_output = output
+        .stdout
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .map(|position| position + marker.len())
+        .map(|start| &output.stdout[start..]);
 
-    if let Some(env_output_start) = stdout.find(marker) {
-        let env_output = &stdout[env_output_start + marker.len()..];
+    if let Some(env_output) = env_output {
+        parse_dump_env_output(env_output, |key, value| match env::var_os(key) {
+            Some(value_now) if value_now == value => {
+                log::debug!("{key:?} set to {value:?}; no change")
+            }
+            Some(value_now) => {
+                log::debug!("{key:?} set to {value:?}; previously was {value_now:?}");
+                env::set_var(key, value);
+            }
+            None => {
+                log::debug!("{key:?} set to {value:?}; previously was not set");
+                env::set_var(key, value);
+            }
+        });
 
-        parse_env_output(env_output, |key, value| env::set_var(key, value));
+        // TODO: Remove vars that are not set in login shell?
 
         log::info!(
-            "set environment variables from shell:{}, path:{}",
+            "set environment variables from shell:{:?}, path:{}",
             shell,
             env::var("PATH").unwrap_or_default(),
         );
