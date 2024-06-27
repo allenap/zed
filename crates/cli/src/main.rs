@@ -5,7 +5,8 @@ use clap::Parser;
 use cli::{ipc::IpcOneShotServer, CliRequest, CliResponse, IpcHandshake};
 use parking_lot::Mutex;
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::Arc,
@@ -51,6 +52,14 @@ struct Args {
     /// Run zed in dev-server mode
     #[arg(long)]
     dev_server_token: Option<String>,
+
+    /// [INTERNAL] Dump environment to stdout
+    ///
+    /// The output is platform-specific and should only be consumed by another
+    /// Zed process running on the same platform, built with the same toolchain,
+    /// Rust version, and so on.
+    #[arg(long, exclusive = true, hide = true)]
+    internal_dump_env: bool,
 }
 
 fn parse_path_with_position(
@@ -83,6 +92,23 @@ fn main() -> Result<()> {
 
     #[cfg(target_os = "linux")]
     let args = flatpak::set_bin_if_no_escape(args);
+
+    // [INTERNAL] Write environment variables to stdout. Keys and values are
+    // written alternately, each terminated by a `NUL` byte. Keys and values are
+    // encoded by [`OsStr::as_encoded_bytes`]. To satisfy the safety constraints
+    // of [`OsString::from_encoded_bytes_unchecked`], the executable on the
+    // receiving end should have been built with the same version of Rust and
+    // for the same target platform as this executable.
+    if args.internal_dump_env {
+        let mut stdout = std::io::stdout().lock();
+        for (key, value) in std::env::vars_os() {
+            stdout.write_all(key.as_encoded_bytes())?;
+            stdout.write_all(b"\0")?;
+            stdout.write_all(value.as_encoded_bytes())?;
+            stdout.write_all(b"\0")?;
+        }
+        return Ok(());
+    }
 
     let app = Detect::detect(args.zed.as_deref()).context("Bundle detection")?;
 
